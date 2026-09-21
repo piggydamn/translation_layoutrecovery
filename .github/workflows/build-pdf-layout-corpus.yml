@@ -31,6 +31,14 @@ jobs:
               tools/pdf_layout_builder.part02b \
               tools/pdf_layout_builder.part03 \
               > tools/build_pdf_layout_corpus.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('tools/build_pdf_layout_corpus.py')
+          text = path.read_text()
+          text = text.replace("'metadataPrefix': 'arXivRaw'", "'metadataPrefix': 'arXiv'")
+          text = text.replace("local_name(element) == 'arXiv'", "local_name(element) in {'arXiv', 'arXivRaw'}")
+          path.write_text(text)
+          PY
           python -m py_compile tools/build_pdf_layout_corpus.py
 
       - name: Install dependencies
