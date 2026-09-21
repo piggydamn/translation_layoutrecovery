@@ -1,4 +1,4 @@
-name: Build PDF Layout Corpus
+name: Build Strict PDF Column Corpus
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -40,23 +40,23 @@ jobs:
       - name: Build and verify corpus
         run: |
           python tools/build_pdf_layout_corpus.py
-          test "$(find out/pdf_layout_collection_50_v2 -type f -name '*.pdf' | wc -l)" -eq 50
-          unzip -t out/pdf_layout_collection_50_v2.zip
-          unzip -t out/pdf_layout_source_files_50_v2.zip
-          (cd out && sha256sum -c pdf_layout_collection_50_v2.sha256)
+          test "$(find out/pdf_strict_columns_50_v3 -type f -name '*.pdf' | wc -l)" -eq 50
+          unzip -t out/pdf_strict_columns_50_v3.zip
+          unzip -t out/pdf_strict_columns_source_files_50_v3.zip
+          (cd out && sha256sum -c pdf_strict_columns_50_v3.sha256)
 
       - name: Upload corpus artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pdf-layout-corpus-v2
+          name: pdf-strict-columns-corpus-v3
           path: |
-            out/pdf_layout_collection_50_v2.zip
-            out/pdf_layout_source_files_50_v2.zip
-            out/pdf_layout_collection_50_v2.sha256
-            out/pdf_layout_collection_50_v2/manifest.csv
-            out/pdf_layout_collection_50_v2/README_CN.md
-            out/pdf_layout_collection_50_v2/previews/contact_sheet_first_pages.jpg
-            out/pdf_layout_collection_50_v2/previews/contact_sheet_inner_pages.jpg
+            out/pdf_strict_columns_50_v3.zip
+            out/pdf_strict_columns_source_files_50_v3.zip
+            out/pdf_strict_columns_50_v3.sha256
+            out/pdf_strict_columns_50_v3/manifest.csv
+            out/pdf_strict_columns_50_v3/README_CN.md
+            out/pdf_strict_columns_50_v3/previews/contact_sheet_first_pages.jpg
+            out/pdf_strict_columns_50_v3/previews/contact_sheet_inner_pages.jpg
           compression-level: 0
           retention-days: 7
           if-no-files-found: error
