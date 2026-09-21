@@ -43,7 +43,7 @@ jobs:
           test "$(find out/pdf_layout_collection_50_v2 -type f -name '*.pdf' | wc -l)" -eq 50
           unzip -t out/pdf_layout_collection_50_v2.zip
           unzip -t out/pdf_layout_source_files_50_v2.zip
-          sha256sum -c out/pdf_layout_collection_50_v2.sha256
+          (cd out && sha256sum -c pdf_layout_collection_50_v2.sha256)
 
       - name: Upload corpus artifact
         uses: actions/upload-artifact@v4
