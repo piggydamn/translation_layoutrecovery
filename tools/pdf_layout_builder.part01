@@ -1,0 +1,179 @@
+        if y0 < h * 0.04 or y1 > h * 0.98:
+            continue
+        blocks.append((x0, y0, x1, y1, len(text)))
+    left = [b for b in blocks if (b[0] + b[2]) / 2 < w * 0.47]
+    right = [b for b in blocks if (b[0] + b[2]) / 2 > w * 0.53]
+    if sum(b[4] for b in left) < 180 or sum(b[4] for b in right) < 180:
+        return False
+    ly0, ly1 = min(b[1] for b in left), max(b[3] for b in left)
+    ry0, ry1 = min(b[1] for b in right), max(b[3] for b in right)
+    overlap = max(0.0, min(ly1, ry1) - max(ly0, ry0))
+    span = max(1.0, min(ly1 - ly0, ry1 - ry0))
+    return overlap / span >= 0.25
+
+
+def analyze(path: Path) -> dict | None:
+    try:
+        doc = fitz.open(path)
+        if doc.needs_pass or doc.page_count < 4 or doc.page_count > 1000:
+            doc.close()
+            return None
+        samples = sample_pages(doc.page_count)
+        images = drawings = image_pages = two_cols = 0
+        for pno in samples:
+            page = doc[pno]
+            nimg = len(page.get_images(full=True))
+            images += nimg
+            image_pages += int(nimg > 0)
+            try:
+                drawings += len(page.get_drawings())
+            except Exception:
+                pass
+            two_cols += int(is_two_column(page))
+        for pno in sorted({0, doc.page_count // 2, doc.page_count - 1}):
+            pix = doc[pno].get_pixmap(matrix=fitz.Matrix(0.85, 0.85), alpha=False)
+            if pix.width < 100 or pix.height < 100:
+                raise ValueError('invalid render')
+        result = {
+            'pages': doc.page_count,
+            'sampled_pages': len(samples),
+            'pages_with_images': image_pages,
+            'embedded_images': images,
+            'vector_drawing_groups': drawings,
+            'two_column_pages': two_cols,
+            'two_column_ratio': round(two_cols / max(1, len(samples)), 3),
+        }
+        doc.close()
+        return result
+    except Exception as e:
+        log(f'PDF FAIL {path.name}: {e}')
+        return None
+
+
+def meets_threshold(a: dict, group: str) -> bool:
+    sampled = max(1, a['sampled_pages'])
+    visual = a['embedded_images'] + min(40, a['vector_drawing_groups'] // 10)
+    image_ratio = a['pages_with_images'] / sampled
+    if group == 'full_circle':
+        return a['pages'] >= 35 and (image_ratio >= 0.45 or visual >= 12)
+    if group == 'r_issue':
+        return a['pages'] >= 80 and a['two_column_ratio'] >= 0.25 and visual >= 4
+    if group == 'r_article':
+        return a['pages'] >= 6 and a['two_column_ratio'] >= 0.30 and visual >= 3
+    if group == 'plos':
+        return a['pages'] >= 6 and visual >= 5
+    return False
+
+
+def render_preview(pdf: Path, pno: int, out: Path) -> None:
+    doc = fitz.open(pdf)
+    pno = max(0, min(pno, doc.page_count - 1))
+    pix = doc[pno].get_pixmap(matrix=fitz.Matrix(1.05, 1.05), alpha=False)
+    pix.save(out)
+    doc.close()
+
+
+def discover_full_circle() -> list[Candidate]:
+    out: list[Candidate] = []
+    for issue in range(228, 175, -1):
+        page = f'https://fullcirclemagazine.org/magazines/issue-{issue}/'
+        soup = get_soup(page)
+        if not soup:
+            continue
+        pdf_url = ''
+        for a in soup.find_all('a', href=True):
+            label = a.get_text(' ', strip=True).lower()
+            href = urljoin(page, a['href'])
+            if 'download pdf' in label or (href.lower().endswith('.pdf') and 'french' not in label):
+                pdf_url = href
+                break
+        if not pdf_url:
+            pdf_url = f'https://dl.fullcirclemagazine.org/issue{issue}_en.pdf'
+        out.append(Candidate(
+            source_group='full_circle',
+            title=f'Full Circle Magazine Issue {issue}',
+            url=pdf_url,
+            category='multi_column_periodical',
+            source_page=page,
+            license_name='Creative Commons ShareAlike (publication statement)',
+            license_url='https://creativecommons.org/licenses/by-sa/3.0/',
+        ))
+        if len(out) >= 30:
+            break
+    return out
+
+
+def r_issue_ids() -> list[str]:
+    return [f'{year}-{issue}' for year in range(2024, 2017, -1) for issue in range(4, 0, -1)]
+
+
+def discover_r_sources() -> tuple[list[Candidate], list[Candidate]]:
+    issues: list[Candidate] = []
+    articles: list[Candidate] = []
+    seen_articles: set[str] = set()
+    for iid in r_issue_ids():
+        page = f'https://journal.r-project.org/issues/{iid}/'
+        soup = get_soup(page)
+        if not soup:
+            continue
+        complete_url = ''
+        for a in soup.find_all('a', href=True):
+            href = urljoin(page, a['href'])
+            label = a.get_text(' ', strip=True).lower()
+            if href.lower().endswith('.pdf') and ('complete' in label or iid in href):
+                complete_url = href
+                break
+        if complete_url:
+            issues.append(Candidate(
+                source_group='r_issue',
+                title=f'The R Journal Complete Issue {iid}',
+                url=complete_url,
+                category='multi_column_periodical',
+                source_page=page,
+                license_name='Open access; articles state CC BY 4.0 reuse terms',
+                license_url='https://creativecommons.org/licenses/by/4.0/',
+            ))
+        for a in soup.find_all('a', href=True):
+            href = urljoin(page, a['href'])
+            m = re.search(r'/articles/(RJ-\d{4}-\d{3})/?$', href)
+            if not m:
+                continue
+            article_id = m.group(1)
+            if article_id in seen_articles:
+                continue
+            seen_articles.add(article_id)
+            title = a.get_text(' ', strip=True) or article_id
+            articles.append(Candidate(
+                source_group='r_article',
+                title=title,
+                url=f'https://journal.r-project.org/articles/{article_id}/{article_id}.pdf',
+                category='two_column_article',
+                source_page=href,
+                license_name='Creative Commons Attribution 4.0 for text and original figures',
+                license_url='https://creativecommons.org/licenses/by/4.0/',
+            ))
+        if len(issues) >= 20 and len(articles) >= 100:
+            break
+    return issues, articles
+
+
+def discover_plos() -> list[Candidate]:
+    out: list[Candidate] = []
+    params = {
+        'q': 'everything:figure AND publication_date:[2021-01-01T00:00:00Z TO 2026-12-31T23:59:59Z]',
+        'fq': 'journal_key:PLoSONE',
+        'fl': 'id,title,publication_date',
+        'rows': '180',
+        'sort': 'publication_date desc',
+        'wt': 'json',
+    }
+    try:
+        r = S.get('https://api.plos.org/search', params=params, timeout=(25, 100))
+        r.raise_for_status()
+        for d in r.json().get('response', {}).get('docs', []):
+            doi = str(d.get('id') or '').strip()
+            title = d.get('title') or doi
+            if isinstance(title, list):
+                title = title[0]
+            if not doi.startswith('10.1371/'):
+                continue
