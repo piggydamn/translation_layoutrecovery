@@ -1,0 +1,180 @@
+            out.append(Candidate(
+                source_group='plos',
+                title=str(title),
+                url=f'https://journals.plos.org/plosone/article/file?id={doi}&type=printable',
+                category='image_rich_research',
+                source_page=f'https://journals.plos.org/plosone/article?id={doi}',
+                license_name='Creative Commons Attribution 4.0',
+                license_url='https://creativecommons.org/licenses/by/4.0/',
+            ))
+    except Exception as e:
+        log(f'PLOS discovery failed: {e}')
+    return out
+
+
+def accept(c: Candidate, records: list[Record], hashes: set[str]) -> bool:
+    if sum(r.file_size_bytes for r in records) >= MAX_TOTAL_BYTES:
+        return False
+    tmp = download(c)
+    if not tmp:
+        return False
+    digest = sha256_file(tmp)
+    if digest in hashes:
+        return False
+    a = analyze(tmp)
+    if not a or not meets_threshold(a, c.source_group):
+        log(f'SKIP layout threshold: {c.title[:90]}')
+        return False
+    next_id = len(records) + 1
+    filename = f'{next_id:02d}_{safe_name(c.source_group)}_{safe_name(c.title)}.pdf'
+    dest = DIRS[c.category] / filename
+    shutil.copy2(tmp, dest)
+    hashes.add(digest)
+    render_preview(dest, 0, PREVIEWS / f'{next_id:02d}_first.png')
+    render_preview(dest, max(1, a['pages'] // 3), PREVIEWS / f'{next_id:02d}_inner.png')
+    records.append(Record(
+        id=next_id,
+        filename=str(dest.relative_to(ROOT)),
+        title=c.title,
+        source_group=c.source_group,
+        category=c.category,
+        source_page=c.source_page,
+        source_url=c.url,
+        license_name=c.license_name,
+        license_url=c.license_url,
+        pages=a['pages'],
+        file_size_bytes=dest.stat().st_size,
+        sha256=digest,
+        sampled_pages=a['sampled_pages'],
+        pages_with_images=a['pages_with_images'],
+        embedded_images=a['embedded_images'],
+        vector_drawing_groups=a['vector_drawing_groups'],
+        two_column_pages=a['two_column_pages'],
+        two_column_ratio=a['two_column_ratio'],
+        render_check='first/middle/last passed',
+    ))
+    log(f'ACCEPT {next_id:02d}/50 [{c.source_group}] {c.title[:90]}')
+    return True
+
+
+def select(candidates: list[Candidate], target: int, records: list[Record], hashes: set[str]) -> int:
+    got = 0
+    for c in candidates:
+        if got >= target or len(records) >= 50:
+            break
+        if accept(c, records, hashes):
+            got += 1
+    return got
+
+
+def contact_sheet(kind: str, out: Path) -> None:
+    files = sorted(PREVIEWS.glob(f'*_{kind}.png'))
+    if not files:
+        return
+    cell_w, cell_h, cols = 260, 360, 5
+    rows = (len(files) + cols - 1) // cols
+    canvas = Image.new('RGB', (cols * cell_w, rows * cell_h), 'white')
+    draw = ImageDraw.Draw(canvas)
+    font = ImageFont.load_default()
+    for i, f in enumerate(files):
+        img = Image.open(f).convert('RGB')
+        img.thumbnail((cell_w - 18, cell_h - 36))
+        x = (i % cols) * cell_w + (cell_w - img.width) // 2
+        y = (i // cols) * cell_h + 22
+        canvas.paste(img, (x, y))
+        draw.text(((i % cols) * cell_w + 8, (i // cols) * cell_h + 5), f.stem[:2], fill='black', font=font)
+    canvas.save(out, quality=88, optimize=True)
+
+
+def write_metadata(records: list[Record]) -> None:
+    with (ROOT / 'manifest.csv').open('w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.DictWriter(f, fieldnames=list(asdict(records[0]).keys()))
+        writer.writeheader()
+        for r in records:
+            writer.writerow(asdict(r))
+    counts: dict[str, int] = {}
+    for r in records:
+        counts[r.source_group] = counts.get(r.source_group, 0) + 1
+    total_pages = sum(r.pages for r in records)
+    total_mib = sum(r.file_size_bytes for r in records) / 1024 / 1024
+    readme = f'''# PDF 复杂版式测试集合 v2（新增 50 份）
+
+本批专门补充完整双栏、多栏和图文混排 PDF。所有文件保留原始完整页，不裁页、不重排。
+
+## 组成
+
+- Full Circle 完整杂志：{counts.get('full_circle', 0)} 份
+- The R Journal 完整期刊：{counts.get('r_issue', 0)} 份
+- The R Journal 完整双栏文章：{counts.get('r_article', 0)} 份
+- PLOS ONE 完整图文研究论文：{counts.get('plos', 0)} 份
+
+合计 {len(records)} 份、{total_pages} 页，PDF 源文件约 {total_mib:.1f} MiB。
+
+## 验证
+
+- 每份均通过 PyMuPDF 打开。
+- 每份均实际渲染首页、中间页和末页。
+- 抽样统计文本列、嵌入图片及矢量图形，未达到版式或图文阈值的候选已排除。
+- `two_column_ratio` 是自动抽样识别结果，只用于筛选，不是人工标注真值。
+
+## 目录
+
+- `01_two_column_articles/`：完整双栏论文。
+- `02_multi_column_periodicals/`：完整多栏杂志和期刊。
+- `03_image_rich_research/`：图表/照片较多的完整研究论文。
+- `manifest.csv`：逐文件来源、许可、页数、SHA-256 和版式统计。
+- `previews/`：首页和内页总览图。
+
+## 许可
+
+每份文件的来源页、下载地址和许可信息均见 `manifest.csv`。原作者、出版者和文件内许可声明保持不变。外部转载图片可能适用各自的许可说明。
+'''
+    (ROOT / 'README_CN.md').write_text(readme, encoding='utf-8')
+    (LICENSES / 'SOURCE_AND_LICENSE_NOTES.txt').write_text(
+        'Full Circle: the publication states that shared materials are Creative Commons Share Alike.\n'
+        'The R Journal: article pages state CC BY 4.0 for text and original figures; reused figures may have separate terms.\n'
+        'PLOS ONE: articles are published under CC BY 4.0 unless a file states otherwise.\n'
+        'Per-file URLs and license labels are in manifest.csv.\n',
+        encoding='utf-8',
+    )
+
+
+def zip_tree(source: Path, dest: Path, pdf_only: bool = False) -> None:
+    with zipfile.ZipFile(dest, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        files = source.rglob('*.pdf') if pdf_only else source.rglob('*')
+        for p in sorted(files):
+            if p.is_file():
+                z.write(p, p.relative_to(source if pdf_only else source.parent))
+
+
+def main() -> None:
+    records: list[Record] = []
+    hashes: set[str] = set()
+    full_circle = discover_full_circle()
+    r_issues, r_articles = discover_r_sources()
+    plos = discover_plos()
+    groups = [
+        ('full_circle', full_circle),
+        ('r_issue', r_issues),
+        ('r_article', r_articles),
+        ('plos', plos),
+    ]
+    for group, candidates in groups:
+        got = select(candidates, TARGETS[group], records, hashes)
+        log(f'GROUP {group}: {got}/{TARGETS[group]}')
+    if len(records) < 50:
+        for group, candidates in [('r_article', r_articles), ('plos', plos), ('full_circle', full_circle), ('r_issue', r_issues)]:
+            accepted_urls = {r.source_url for r in records}
+            for c in candidates:
+                if len(records) >= 50:
+                    break
+                if c.url in accepted_urls:
+                    continue
+                if accept(c, records, hashes):
+                    accepted_urls.add(c.url)
+            if len(records) >= 50:
+                break
+    if len(records) != 50:
+        raise RuntimeError(f'Only collected {len(records)} valid PDFs; expected 50')
+    contact_sheet('first', PREVIEWS / 'contact_sheet_first_pages.jpg')
+    contact_sheet('inner', PREVIEWS / 'contact_sheet_inner_pages.jpg')
