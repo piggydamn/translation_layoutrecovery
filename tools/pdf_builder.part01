@@ -1,0 +1,140 @@
+                for chunk in r.iter_content(1024 * 256):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > MAX_FILE_BYTES:
+                        raise ValueError("file exceeds size cap")
+                    f.write(chunk)
+        head = dest.read_bytes()[:8]
+        if not head.startswith(b"%PDF-"):
+            log(f"SKIP not PDF ({ctype}): {candidate.url}")
+            dest.unlink(missing_ok=True)
+            return None
+        return dest
+    except Exception as e:
+        log(f"DOWNLOAD FAIL {candidate.url}: {e}")
+        dest.unlink(missing_ok=True)
+        return None
+
+
+def sample_page_numbers(page_count: int, maximum: int = 10) -> list[int]:
+    if page_count <= maximum:
+        return list(range(page_count))
+    nums = {0, 1, 2, page_count // 4, page_count // 2, (3 * page_count) // 4, page_count - 3, page_count - 2, page_count - 1}
+    step = max(1, page_count // maximum)
+    nums.update(range(0, page_count, step))
+    return sorted(n for n in nums if 0 <= n < page_count)[:maximum]
+
+
+def page_is_two_column(page: fitz.Page) -> bool:
+    w = page.rect.width
+    h = page.rect.height
+    blocks = []
+    for b in page.get_text("blocks"):
+        x0, y0, x1, y1, text = b[:5]
+        text = re.sub(r"\s+", " ", text or "").strip()
+        if len(text) < 70:
+            continue
+        bw = x1 - x0
+        bh = y1 - y0
+        if bw <= 0 or bh <= 0 or bw > w * 0.72 or bh > h * 0.82:
+            continue
+        if y0 < h * 0.06 or y1 > h * 0.97:
+            continue
+        blocks.append((x0, y0, x1, y1, len(text)))
+    left = [b for b in blocks if (b[0] + b[2]) / 2 < w * 0.47]
+    right = [b for b in blocks if (b[0] + b[2]) / 2 > w * 0.53]
+    if sum(b[4] for b in left) < 220 or sum(b[4] for b in right) < 220:
+        return False
+    ly0, ly1 = min(b[1] for b in left), max(b[3] for b in left)
+    ry0, ry1 = min(b[1] for b in right), max(b[3] for b in right)
+    overlap = max(0.0, min(ly1, ry1) - max(ly0, ry0))
+    span = max(1.0, min(ly1 - ly0, ry1 - ry0))
+    return overlap / span >= 0.30
+
+
+def analyze_pdf(path: Path) -> dict | None:
+    try:
+        doc = fitz.open(path)
+        if doc.needs_pass or doc.page_count < 4 or doc.page_count > 1200:
+            doc.close()
+            return None
+        samples = sample_page_numbers(doc.page_count)
+        images = drawings = pages_with_images = two_col = 0
+        for pno in samples:
+            page = doc[pno]
+            page_images = len(page.get_images(full=True))
+            images += page_images
+            if page_images:
+                pages_with_images += 1
+            try:
+                drawings += len(page.get_drawings())
+            except Exception:
+                pass
+            if page_is_two_column(page):
+                two_col += 1
+        # Rendering first, middle, and last catches many malformed PDFs.
+        render_pages = sorted({0, doc.page_count // 2, doc.page_count - 1})
+        for pno in render_pages:
+            pix = doc[pno].get_pixmap(matrix=fitz.Matrix(0.8, 0.8), alpha=False)
+            if pix.width < 50 or pix.height < 50:
+                raise ValueError("invalid render")
+        result = {
+            "pages": doc.page_count,
+            "sampled_pages": len(samples),
+            "pages_with_images": pages_with_images,
+            "embedded_images": images,
+            "vector_drawing_groups": drawings,
+            "two_column_pages": two_col,
+            "two_column_ratio": round(two_col / max(1, len(samples)), 3),
+        }
+        doc.close()
+        return result
+    except Exception as e:
+        log(f"PDF ANALYSIS FAIL {path.name}: {e}")
+        return None
+
+
+def visual_enough(a: dict, source_group: str) -> bool:
+    sampled = max(1, a["sampled_pages"])
+    visual_signal = a["embedded_images"] + min(30, a["vector_drawing_groups"] // 8)
+    if source_group == "full_circle":
+        return a["pages"] >= 25 and (a["pages_with_images"] / sampled >= 0.45 or visual_signal >= 10)
+    if source_group == "r_journal_issue":
+        return a["pages"] >= 80 and a["two_column_ratio"] >= 0.35 and visual_signal >= 5
+    if source_group == "r_journal_article":
+        return a["pages"] >= 5 and a["two_column_ratio"] >= 0.35 and visual_signal >= 3
+    if source_group in {"plos", "europe_pmc", "arxiv"}:
+        return a["pages"] >= 5 and a["two_column_ratio"] >= 0.25 and visual_signal >= 4
+    return visual_signal >= 4
+
+
+def render_preview(pdf_path: Path, stem: str, page_no: int, out_name: str) -> Path:
+    doc = fitz.open(pdf_path)
+    page_no = max(0, min(page_no, doc.page_count - 1))
+    page = doc[page_no]
+    pix = page.get_pixmap(matrix=fitz.Matrix(1.15, 1.15), alpha=False)
+    out = PREVIEW_DIR / out_name
+    pix.save(out)
+    doc.close()
+    return out
+
+
+def discover_full_circle() -> list[Candidate]:
+    out = []
+    for n in range(224, 109, -1):
+        out.append(Candidate(
+            source_group="full_circle",
+            title=f"Full Circle Magazine Issue {n}",
+            url=f"https://dl.fullcirclemagazine.org/issue{n}_en.pdf",
+            category="multi_column_periodical",
+            license_name="Creative Commons Attribution-ShareAlike 3.0 Unported",
+            license_url="https://creativecommons.org/licenses/by-sa/3.0/",
+            source_page="https://fullcirclemagazine.org/downloads/",
+        ))
+    return out
+
+
+def get_soup(url: str) -> BeautifulSoup | None:
+    try:
+        r = S.get(url, timeout=(20, 60))
