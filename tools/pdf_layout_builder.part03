@@ -1,11 +1,11 @@
     for p in list(PREVIEWS.glob('*_first.png')) + list(PREVIEWS.glob('*_inner.png')):
         p.unlink(missing_ok=True)
     write_metadata(records)
-    full_zip = Path('out/pdf_layout_collection_50_v2.zip')
-    source_zip = Path('out/pdf_layout_source_files_50_v2.zip')
+    full_zip = Path('out/pdf_strict_columns_50_v3.zip')
+    source_zip = Path('out/pdf_strict_columns_source_files_50_v3.zip')
     zip_tree(ROOT, full_zip, pdf_only=False)
     zip_tree(ROOT, source_zip, pdf_only=True)
-    sha = Path('out/pdf_layout_collection_50_v2.sha256')
+    sha = Path('out/pdf_strict_columns_50_v3.sha256')
     sha.write_text(
         f'{sha256_file(full_zip)}  {full_zip.name}\n'
         f'{sha256_file(source_zip)}  {source_zip.name}\n',
