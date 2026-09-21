@@ -12,6 +12,63 @@
     return out
 
 
+def discover_arxiv_cc() -> list[Candidate]:
+    atom = 'http://www.w3.org/2005/Atom'
+    arxiv = 'http://arxiv.org/schemas/atom'
+    ns = {'atom': atom, 'arxiv': arxiv}
+    queries = ['cat:cs.CV', 'cat:cs.CL', 'cat:cs.RO', 'cat:eess.IV', 'cat:cs.GR', 'cat:cs.LG', 'cat:cs.AI']
+    out: list[Candidate] = []
+    seen: set[str] = set()
+    for query in queries:
+        params = {
+            'search_query': query,
+            'start': 0,
+            'max_results': 250,
+            'sortBy': 'submittedDate',
+            'sortOrder': 'descending',
+        }
+        try:
+            r = S.get('https://export.arxiv.org/api/query', params=params, timeout=(25, 120))
+            r.raise_for_status()
+            root = ET.fromstring(r.content)
+            for entry in root.findall('atom:entry', ns):
+                license_el = entry.find('arxiv:license', ns)
+                license_url = (license_el.text or '').strip() if license_el is not None else ''
+                if 'creativecommons.org/' not in license_url.lower():
+                    continue
+                title_el = entry.find('atom:title', ns)
+                id_el = entry.find('atom:id', ns)
+                title = re.sub(r'\s+', ' ', (title_el.text or 'arXiv paper')).strip() if title_el is not None else 'arXiv paper'
+                source_page = (id_el.text or '').strip() if id_el is not None else ''
+                source_page = source_page.replace('http://', 'https://', 1)
+                pdf_url = ''
+                for link in entry.findall('atom:link', ns):
+                    href = link.attrib.get('href', '')
+                    if link.attrib.get('title') == 'pdf' or link.attrib.get('type') == 'application/pdf':
+                        pdf_url = href
+                        break
+                if not pdf_url and source_page:
+                    pdf_url = source_page.replace('/abs/', '/pdf/') + '.pdf'
+                pdf_url = pdf_url.replace('http://', 'https://', 1)
+                if not pdf_url or pdf_url in seen:
+                    continue
+                seen.add(pdf_url)
+                out.append(Candidate(
+                    source_group='arxiv_cc',
+                    title=title,
+                    url=pdf_url,
+                    category='two_column_article',
+                    source_page=source_page,
+                    license_name='Creative Commons license declared in arXiv metadata',
+                    license_url=license_url,
+                ))
+            log(f'arXiv discovery {query}: cumulative {len(out)} Creative Commons candidates')
+        except Exception as e:
+            log(f'arXiv discovery failed for {query}: {e}')
+        time.sleep(3.2)
+    return out
+
+
 def accept(c: Candidate, records: list[Record], hashes: set[str]) -> bool:
     if sum(r.file_size_bytes for r in records) >= MAX_TOTAL_BYTES:
         return False
@@ -97,16 +154,14 @@ def write_metadata(records: list[Record]) -> None:
         counts[r.source_group] = counts.get(r.source_group, 0) + 1
     total_pages = sum(r.pages for r in records)
     total_mib = sum(r.file_size_bytes for r in records) / 1024 / 1024
-    readme = f'''# PDF 复杂版式测试集合 v2（新增 50 份）
+    readme = f'''# PDF 严格双栏/多栏测试集合 v3（50 份）
 
-本批专门补充完整双栏、多栏和图文混排 PDF。所有文件保留原始完整页，不裁页、不重排。
+本批只保留自动抽样识别为真实双栏或多栏、并且具有图片或矢量图形的完整 PDF。所有文件保留原始完整页，不裁页、不重排。
 
 ## 组成
 
-- Full Circle 完整杂志：{counts.get('full_circle', 0)} 份
-- The R Journal 完整期刊：{counts.get('r_issue', 0)} 份
-- The R Journal 完整双栏文章：{counts.get('r_article', 0)} 份
-- PLOS ONE 完整图文研究论文：{counts.get('plos', 0)} 份
+- Full Circle 完整多栏杂志：{counts.get('full_circle', 0)} 份
+- arXiv 明示 Creative Commons 许可的完整双栏论文：{counts.get('arxiv_cc', 0)} 份
 
 合计 {len(records)} 份、{total_pages} 页，PDF 源文件约 {total_mib:.1f} MiB。
 
@@ -114,27 +169,26 @@ def write_metadata(records: list[Record]) -> None:
 
 - 每份均通过 PyMuPDF 打开。
 - 每份均实际渲染首页、中间页和末页。
-- 抽样统计文本列、嵌入图片及矢量图形，未达到版式或图文阈值的候选已排除。
-- `two_column_ratio` 是自动抽样识别结果，只用于筛选，不是人工标注真值。
+- 抽样页面必须达到双栏/多栏阈值，同时包含嵌入图片或矢量图形信号。
+- `two_column_ratio` 是抽样页面中识别出左右文本列的比例，用于机器筛选，不是人工标注真值。
 
 ## 目录
 
 - `01_two_column_articles/`：完整双栏论文。
-- `02_multi_column_periodicals/`：完整多栏杂志和期刊。
-- `03_image_rich_research/`：图表/照片较多的完整研究论文。
-- `manifest.csv`：逐文件来源、许可、页数、SHA-256 和版式统计。
-- `previews/`：首页和内页总览图。
+- `02_multi_column_periodicals/`：完整多栏杂志。
+- `manifest.csv`：逐文件来源、许可、页数、SHA-256、图片和栏结构统计。
+- `previews/contact_sheet_first_pages.jpg`：全部首页总览。
+- `previews/contact_sheet_inner_pages.jpg`：全部内页总览，用于直接检查栏结构和图文混排。
 
 ## 许可
 
-每份文件的来源页、下载地址和许可信息均见 `manifest.csv`。原作者、出版者和文件内许可声明保持不变。外部转载图片可能适用各自的许可说明。
+每份文件的来源页、直接下载地址和具体许可地址均记录在 `manifest.csv`。原作者、出版者及文件内许可声明保持不变；本集合不改变单份文件原有许可条件。
 '''
     (ROOT / 'README_CN.md').write_text(readme, encoding='utf-8')
     (LICENSES / 'SOURCE_AND_LICENSE_NOTES.txt').write_text(
-        'Full Circle: the publication states that shared materials are Creative Commons Share Alike.\n'
-        'The R Journal: article pages state CC BY 4.0 for text and original figures; reused figures may have separate terms.\n'
-        'PLOS ONE: articles are published under CC BY 4.0 unless a file states otherwise.\n'
-        'Per-file URLs and license labels are in manifest.csv.\n',
+        'Full Circle: the publication states that shared PDF materials are Creative Commons Share Alike.\n'
+        'arXiv: only records whose arXiv API metadata contains a Creative Commons license URL are included.\n'
+        'The exact license URL, source page and source PDF URL are recorded per file in manifest.csv.\n',
         encoding='utf-8',
     )
 
@@ -151,19 +205,16 @@ def main() -> None:
     records: list[Record] = []
     hashes: set[str] = set()
     full_circle = discover_full_circle()
-    r_issues, r_articles = discover_r_sources()
-    plos = discover_plos()
+    arxiv_cc = discover_arxiv_cc()
     groups = [
         ('full_circle', full_circle),
-        ('r_issue', r_issues),
-        ('r_article', r_articles),
-        ('plos', plos),
+        ('arxiv_cc', arxiv_cc),
     ]
     for group, candidates in groups:
         got = select(candidates, TARGETS[group], records, hashes)
         log(f'GROUP {group}: {got}/{TARGETS[group]}')
     if len(records) < 50:
-        for group, candidates in [('r_article', r_articles), ('plos', plos), ('full_circle', full_circle), ('r_issue', r_issues)]:
+        for group, candidates in [('arxiv_cc', arxiv_cc), ('full_circle', full_circle)]:
             accepted_urls = {r.source_url for r in records}
             for c in candidates:
                 if len(records) >= 50:
@@ -175,6 +226,6 @@ def main() -> None:
             if len(records) >= 50:
                 break
     if len(records) != 50:
-        raise RuntimeError(f'Only collected {len(records)} valid PDFs; expected 50')
+        raise RuntimeError(f'Only collected {len(records)} strict-layout PDFs; expected 50')
     contact_sheet('first', PREVIEWS / 'contact_sheet_first_pages.jpg')
     contact_sheet('inner', PREVIEWS / 'contact_sheet_inner_pages.jpg')
