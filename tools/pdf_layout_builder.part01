@@ -55,7 +55,9 @@ def meets_threshold(a: dict, group: str) -> bool:
     visual = a['embedded_images'] + min(40, a['vector_drawing_groups'] // 10)
     image_ratio = a['pages_with_images'] / sampled
     if group == 'full_circle':
-        return a['pages'] >= 35 and (image_ratio >= 0.45 or visual >= 12)
+        return a['pages'] >= 35 and a['two_column_ratio'] >= 0.45 and image_ratio >= 0.70
+    if group == 'arxiv_cc':
+        return a['pages'] >= 5 and a['two_column_ratio'] >= 0.35 and (image_ratio >= 0.25 or visual >= 4)
     if group == 'r_issue':
         return a['pages'] >= 80 and a['two_column_ratio'] >= 0.25 and visual >= 4
     if group == 'r_article':
@@ -98,7 +100,7 @@ def discover_full_circle() -> list[Candidate]:
             license_name='Creative Commons ShareAlike (publication statement)',
             license_url='https://creativecommons.org/licenses/by-sa/3.0/',
         ))
-        if len(out) >= 30:
+        if len(out) >= 40:
             break
     return out
 
