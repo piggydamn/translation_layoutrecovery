@@ -30,6 +30,16 @@ jobs:
               tools/pdf_layout_builder.part02 \
               tools/pdf_layout_builder.part03 \
               > tools/build_pdf_layout_corpus.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('tools/build_pdf_layout_corpus.py')
+          text = path.read_text()
+          old = "license_url = (license_el.text or '').strip() if license_el is not None else ''"
+          new = "license_url = ((license_el.text or license_el.attrib.get('href', '')) if license_el is not None else '').strip()"
+          if old not in text:
+              raise SystemExit('arXiv license extraction line not found')
+          path.write_text(text.replace(old, new))
+          PY
           python -m py_compile tools/build_pdf_layout_corpus.py
 
       - name: Install dependencies
