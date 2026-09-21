@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import csv
+import hashlib
+import html
+import re
+import shutil
+import time
+import unicodedata
+import zipfile
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from urllib.parse import urljoin
+
+import fitz
+import requests
+from bs4 import BeautifulSoup
+from PIL import Image, ImageDraw, ImageFont
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+ROOT = Path('out/pdf_layout_collection_50_v2')
+TMP = Path('out/.downloads')
+PREVIEWS = ROOT / 'previews'
+LICENSES = ROOT / 'licenses'
+DIRS = {
+    'two_column_article': ROOT / '01_two_column_articles',
+    'multi_column_periodical': ROOT / '02_multi_column_periodicals',
+    'image_rich_research': ROOT / '03_image_rich_research',
+}
+TARGETS = {
+    'full_circle': 12,
+    'r_issue': 12,
+    'r_article': 16,
+    'plos': 10,
+}
+MAX_FILE_BYTES = 45 * 1024 * 1024
+MAX_TOTAL_BYTES = 650 * 1024 * 1024
+USER_AGENT = 'PDF-layout-corpus-builder/2.1 (public test corpus)'
+
+for p in [ROOT, TMP, PREVIEWS, LICENSES, *DIRS.values()]:
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def make_session() -> requests.Session:
+    s = requests.Session()
+    retry = Retry(
+        total=5,
+        connect=5,
+        read=5,
+        backoff_factor=1.0,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({'GET', 'HEAD'}),
+        respect_retry_after_header=True,
+    )
+    s.mount('https://', HTTPAdapter(max_retries=retry, pool_connections=12, pool_maxsize=12))
+    s.mount('http://', HTTPAdapter(max_retries=retry, pool_connections=12, pool_maxsize=12))
+    s.headers.update({'User-Agent': USER_AGENT, 'Accept': '*/*'})
+    return s
+
+
+S = make_session()
+
+
+@dataclass
+class Candidate:
+    source_group: str
+    title: str
+    url: str
+    category: str
+    source_page: str
+    license_name: str
+    license_url: str
+
+
+@dataclass
+class Record:
+    id: int
+    filename: str
+    title: str
+    source_group: str
+    category: str
+    source_page: str
+    source_url: str
+    license_name: str
+    license_url: str
+    pages: int
+    file_size_bytes: int
+    sha256: str
+    sampled_pages: int
+    pages_with_images: int
+    embedded_images: int
+    vector_drawing_groups: int
+    two_column_pages: int
+    two_column_ratio: float
+    render_check: str
+
+
+def log(msg: str) -> None:
+    print(msg, flush=True)
+
+
+def safe_name(text: str, max_len: int = 105) -> str:
+    text = html.unescape(text)
+    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
+    text = re.sub(r'[^A-Za-z0-9._ -]+', '', text)
+    text = re.sub(r'\s+', '_', text).strip('._-')
+    return (text or 'document')[:max_len]
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open('rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def get_soup(url: str) -> BeautifulSoup | None:
+    try:
+        r = S.get(url, timeout=(20, 75))
+        r.raise_for_status()
+        return BeautifulSoup(r.text, 'html.parser')
+    except Exception as e:
+        log(f'HTML FAIL {url}: {e}')
+        return None
+
+
+def download(c: Candidate) -> Path | None:
+    key = hashlib.sha1(c.url.encode()).hexdigest()[:14]
+    dest = TMP / f'{safe_name(c.source_group)}_{key}.pdf'
+    if dest.exists() and dest.stat().st_size > 1024:
+        return dest
+    try:
+        with S.get(c.url, stream=True, timeout=(25, 120), allow_redirects=True) as r:
+            r.raise_for_status()
+            clen = int(r.headers.get('content-length') or 0)
+            if clen and clen > MAX_FILE_BYTES:
+                log(f'SKIP too large ({clen}): {c.url}')
+                return None
+            total = 0
+            with dest.open('wb') as f:
+                for chunk in r.iter_content(1024 * 256):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > MAX_FILE_BYTES:
+                        raise ValueError('file exceeds size cap')
+                    f.write(chunk)
+        if not dest.read_bytes()[:8].startswith(b'%PDF-'):
+            raise ValueError('download is not a PDF')
+        return dest
+    except Exception as e:
+        log(f'DOWNLOAD FAIL {c.url}: {e}')
+        dest.unlink(missing_ok=True)
+        return None
+
+
+def sample_pages(page_count: int, maximum: int = 12) -> list[int]:
+    if page_count <= maximum:
+        return list(range(page_count))
+    points = {0, 1, 2, page_count - 1, page_count - 2, page_count // 4,
+              page_count // 3, page_count // 2, 2 * page_count // 3, 3 * page_count // 4}
+    step = max(1, page_count // maximum)
+    points.update(range(0, page_count, step))
+    return sorted(p for p in points if 0 <= p < page_count)[:maximum]
+
+
+def is_two_column(page: fitz.Page) -> bool:
+    w, h = page.rect.width, page.rect.height
+    blocks = []
+    for b in page.get_text('blocks'):
+        x0, y0, x1, y1, text = b[:5]
+        text = re.sub(r'\s+', ' ', text or '').strip()
+        if len(text) < 65:
+            continue
+        bw, bh = x1 - x0, y1 - y0
+        if bw <= 0 or bh <= 0 or bw > w * 0.74 or bh > h * 0.86:
+            continue
