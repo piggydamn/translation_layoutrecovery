@@ -8,6 +8,7 @@ import re
 import shutil
 import time
 import unicodedata
+import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -20,7 +21,7 @@ from PIL import Image, ImageDraw, ImageFont
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-ROOT = Path('out/pdf_layout_collection_50_v2')
+ROOT = Path('out/pdf_strict_columns_50_v3')
 TMP = Path('out/.downloads')
 PREVIEWS = ROOT / 'previews'
 LICENSES = ROOT / 'licenses'
@@ -30,14 +31,15 @@ DIRS = {
     'image_rich_research': ROOT / '03_image_rich_research',
 }
 TARGETS = {
-    'full_circle': 12,
+    'full_circle': 20,
     'r_issue': 0,
     'r_article': 0,
-    'plos': 38,
+    'plos': 0,
+    'arxiv_cc': 30,
 }
 MAX_FILE_BYTES = 45 * 1024 * 1024
-MAX_TOTAL_BYTES = 650 * 1024 * 1024
-USER_AGENT = 'PDF-layout-corpus-builder/2.1 (public test corpus)'
+MAX_TOTAL_BYTES = 700 * 1024 * 1024
+USER_AGENT = 'PDF-layout-corpus-builder/3.0 (public test corpus; contact via repository owner)'
 
 for p in [ROOT, TMP, PREVIEWS, LICENSES, *DIRS.values()]:
     p.mkdir(parents=True, exist_ok=True)
