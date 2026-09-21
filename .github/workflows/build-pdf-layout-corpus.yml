@@ -28,13 +28,17 @@ jobs:
           cat tools/pdf_layout_builder.part00 \
               tools/pdf_layout_builder.part01 \
               tools/pdf_layout_builder.part02 \
-              tools/pdf_layout_builder.part02b \
               tools/pdf_layout_builder.part03 \
               > tools/build_pdf_layout_corpus.py
           python - <<'PY'
           from pathlib import Path
           path = Path('tools/build_pdf_layout_corpus.py')
           text = path.read_text()
+          override = Path('tools/pdf_layout_builder.part02b').read_text().rstrip() + '\n\n'
+          marker = '\ndef accept(c: Candidate, records: list[Record], hashes: set[str]) -> bool:\n'
+          if marker not in text:
+              raise SystemExit('accept() insertion marker not found')
+          text = text.replace(marker, '\n' + override + marker.lstrip('\n'), 1)
           text = text.replace("'metadataPrefix': 'arXivRaw'", "'metadataPrefix': 'arXiv'")
           text = text.replace("local_name(element) == 'arXiv'", "local_name(element) in {'arXiv', 'arXivRaw'}")
           path.write_text(text)
