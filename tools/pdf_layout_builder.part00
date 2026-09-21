@@ -31,9 +31,9 @@ DIRS = {
 }
 TARGETS = {
     'full_circle': 12,
-    'r_issue': 12,
-    'r_article': 16,
-    'plos': 10,
+    'r_issue': 0,
+    'r_article': 0,
+    'plos': 38,
 }
 MAX_FILE_BYTES = 45 * 1024 * 1024
 MAX_TOTAL_BYTES = 650 * 1024 * 1024
