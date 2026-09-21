@@ -1,0 +1,81 @@
+
+
+def discover_arxiv_cc() -> list[Candidate]:
+    """Harvest redistributable arXiv records from the official OAI-PMH endpoint."""
+    endpoint = 'https://oaipmh.arxiv.org/oai'
+    set_specs = [
+        'cs:cs:CV',
+        'cs:cs:CL',
+        'cs:cs:RO',
+        'eess:eess:IV',
+        'cs:cs:GR',
+        'cs:cs:LG',
+        'cs:cs:AI',
+    ]
+    out: list[Candidate] = []
+    seen: set[str] = set()
+
+    def local_name(element: ET.Element) -> str:
+        return element.tag.rsplit('}', 1)[-1]
+
+    for set_spec in set_specs:
+        params: dict[str, str] = {
+            'verb': 'ListRecords',
+            'metadataPrefix': 'arXivRaw',
+            'set': set_spec,
+            'from': '2023-01-01',
+        }
+        page = 0
+        while page < 3 and len(out) < 180:
+            try:
+                response = S.get(endpoint, params=params, timeout=(25, 120))
+                response.raise_for_status()
+                root = ET.fromstring(response.content)
+                records = [element for element in root.iter() if local_name(element) == 'record']
+                for record in records:
+                    header = next((element for element in record if local_name(element) == 'header'), None)
+                    if header is not None and header.attrib.get('status') == 'deleted':
+                        continue
+                    metadata = next((element for element in record if local_name(element) == 'metadata'), None)
+                    if metadata is None:
+                        continue
+                    arxiv_meta = next((element for element in metadata.iter() if local_name(element) == 'arXiv'), None)
+                    if arxiv_meta is None:
+                        continue
+                    fields: dict[str, str] = {}
+                    for child in arxiv_meta:
+                        name = local_name(child)
+                        if name not in fields:
+                            fields[name] = re.sub(r'\s+', ' ', child.text or '').strip()
+                    license_url = fields.get('license', '')
+                    if 'creativecommons.org/' not in license_url.lower():
+                        continue
+                    paper_id = fields.get('id', '').strip()
+                    title = fields.get('title', '').strip() or f'arXiv {paper_id}'
+                    if not paper_id or paper_id in seen:
+                        continue
+                    seen.add(paper_id)
+                    out.append(Candidate(
+                        source_group='arxiv_cc',
+                        title=title,
+                        url=f'https://arxiv.org/pdf/{paper_id}',
+                        category='two_column_article',
+                        source_page=f'https://arxiv.org/abs/{paper_id}',
+                        license_name='Creative Commons license declared in arXiv OAI-PMH metadata',
+                        license_url=license_url,
+                    ))
+                token_element = next((element for element in root.iter() if local_name(element) == 'resumptionToken'), None)
+                token = (token_element.text or '').strip() if token_element is not None else ''
+                page += 1
+                log(f'arXiv OAI {set_spec} page {page}: cumulative {len(out)} Creative Commons candidates')
+                if not token:
+                    break
+                params = {'verb': 'ListRecords', 'resumptionToken': token}
+                time.sleep(3.2)
+            except Exception as e:
+                log(f'arXiv OAI discovery failed for {set_spec}: {e}')
+                break
+        time.sleep(3.2)
+        if len(out) >= 180:
+            break
+    return out
