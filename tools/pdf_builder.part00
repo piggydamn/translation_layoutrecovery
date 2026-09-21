@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import csv
+import hashlib
+import html
+import io
+import os
+import re
+import shutil
+import sys
+import time
+import unicodedata
+import zipfile
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Iterable
+from urllib.parse import urljoin
+
+import fitz
+import feedparser
+import requests
+from bs4 import BeautifulSoup
+from PIL import Image, ImageDraw, ImageFont
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+ROOT = Path("out/pdf_layout_collection_50_v2")
+PDF_DIRS = {
+    "two_column_paper": ROOT / "01_two_column_papers",
+    "multi_column_periodical": ROOT / "02_multi_column_periodicals",
+    "image_rich_research": ROOT / "03_image_rich_research",
+}
+PREVIEW_DIR = ROOT / "previews"
+LICENSE_DIR = ROOT / "licenses"
+TMP_DIR = Path("out/.pdf_downloads")
+TARGETS = {
+    "full_circle": 10,
+    "r_journal_issue": 5,
+    "r_journal_article": 10,
+    "plos": 10,
+    "europe_pmc": 5,
+    "arxiv": 10,
+}
+MAX_FILE_BYTES = 45 * 1024 * 1024
+MAX_TOTAL_BYTES = 700 * 1024 * 1024
+USER_AGENT = "PDF-layout-corpus-builder/2.0 (+https://github.com/piggydamn/translation_layoutrecovery)"
+
+for p in [ROOT, PREVIEW_DIR, LICENSE_DIR, TMP_DIR, *PDF_DIRS.values()]:
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def session() -> requests.Session:
+    s = requests.Session()
+    retry = Retry(
+        total=5,
+        connect=5,
+        read=5,
+        backoff_factor=1.0,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET", "HEAD"}),
+        respect_retry_after_header=True,
+    )
+    s.mount("https://", HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10))
+    s.mount("http://", HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10))
+    s.headers.update({"User-Agent": USER_AGENT, "Accept": "*/*"})
+    return s
+
+S = session()
+
+
+@dataclass
+class Candidate:
+    source_group: str
+    title: str
+    url: str
+    category: str
+    license_name: str
+    license_url: str
+    source_page: str = ""
+
+
+@dataclass
+class Record:
+    id: int
+    filename: str
+    title: str
+    source_group: str
+    category: str
+    source_url: str
+    source_page: str
+    license_name: str
+    license_url: str
+    pages: int
+    file_size_bytes: int
+    sha256: str
+    sampled_pages: int
+    pages_with_images: int
+    embedded_images: int
+    vector_drawing_groups: int
+    two_column_pages: int
+    two_column_ratio: float
+    render_check: str
+
+
+def log(msg: str) -> None:
+    print(msg, flush=True)
+
+
+def safe_name(text: str, max_len: int = 115) -> str:
+    text = html.unescape(text)
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"[^A-Za-z0-9._ -]+", "", text)
+    text = re.sub(r"\s+", "_", text).strip("._-")
+    return (text or "document")[:max_len]
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def download(candidate: Candidate) -> Path | None:
+    key = hashlib.sha1(candidate.url.encode()).hexdigest()[:12]
+    dest = TMP_DIR / f"{safe_name(candidate.source_group)}_{key}.pdf"
+    if dest.exists() and dest.stat().st_size > 1000:
+        return dest
+    try:
+        with S.get(candidate.url, stream=True, timeout=(20, 90), allow_redirects=True) as r:
+            r.raise_for_status()
+            ctype = (r.headers.get("content-type") or "").lower()
+            clen = int(r.headers.get("content-length") or 0)
+            if clen and clen > MAX_FILE_BYTES:
+                log(f"SKIP too large ({clen}): {candidate.url}")
+                return None
+            total = 0
+            with dest.open("wb") as f:
